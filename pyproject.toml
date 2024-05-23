@@ -9,6 +9,8 @@ dependencies = [
     'numpy',
     'pandas',
     'anndata',
+    'scipy',
+    'numba',
 ]
 authors = [
   { name="Jonathan Golob", email="j-dev@golob.org" },

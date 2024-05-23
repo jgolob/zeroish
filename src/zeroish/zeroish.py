@@ -19,9 +19,51 @@ consoleHandler = logging.StreamHandler()
 consoleHandler.setFormatter(logFormatter)
 rootLogger.addHandler(consoleHandler)
 
-def per_feature_cutoffs(count_mat, percentile):
-    print (count_mat)
-    return
+def get_feature_cutoffs_percentile(f_mat, percentile):
+    f_percentile_cutoffs = pd.Series(
+        f_mat.apply(
+            lambda r: 10**np.percentile(
+                np.log10(r[
+                    r.nonzero()
+                ]),
+                percentile
+            ),
+            axis=0,
+            engine='numba',
+            raw=True,
+            engine_kwargs={
+                'parallel': True,
+            },
+        ),
+        index=f_mat.columns
+    )
+    return f_percentile_cutoffs
+
+def generate_pdet_matrix(count_mat, total_counts_vec, feature_cutoffs_vec):
+    zero_values = pd.DataFrame(
+        np.where(count_mat == 0),
+        index=['obs_i', 'feat_j']
+    ).astype(int).T
+    zero_values.index = range(len(zero_values))
+    p_det = zero_values.apply(
+        lambda r: np.exp(
+            -1*total_counts_vec[r[0]]*feature_cutoffs_vec[r[1]]
+        ),
+        axis=1,
+        raw=True,
+        engine='numba',        
+        engine_kwargs={
+            'parallel': True,
+        },
+    )
+    p_det_mat = np.ones(
+        shape=count_mat.shape,
+        dtype=np.float32
+    )
+    for idx, row in zero_values.iterrows():
+        p_det_mat[row.obs_i, row.feat_j] = p_det[idx]
+
+    return p_det_mat    
 
 def autodetect_input_and_open(filename):
     filename =  filename.strip()
@@ -145,6 +187,7 @@ def main():
         count_mat = pd.read_csv(
             fh,
             delimiter=delimiter,
+            index_col=0,
         )
 
     else:
@@ -153,11 +196,22 @@ def main():
         )
         sys.exit(404)
 
+    # Generate a fractional abundance matrix after getting the per-obs total reads
+    total_counts = count_mat.sum(axis=1)
+    f_mat = (count_mat.T / total_counts).T
     # Great now identify per-feature cutoffs
-    per_feature_cutoffs(
-        count_mat, 
+    feature_cutoffs_percentile = get_feature_cutoffs_percentile(
+        f_mat, 
         percentile=args.percentile
     )
+    p_det_mat = generate_pdet_matrix(
+        count_mat,
+        total_counts.astype(np.int32).values,
+        feature_cutoffs_percentile.astype(np.float32).values,
+    )
+
+    print(p_det_mat)
+
 
 if __name__ == "__main__":
     main()
