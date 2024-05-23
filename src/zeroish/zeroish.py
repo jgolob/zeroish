@@ -5,6 +5,9 @@ import numpy as np
 import logging
 import sys
 import gzip
+import anndata as ad
+import pandas as pd
+import scipy
 
 # Set up logging
 rootLogger = logging.getLogger()
@@ -15,6 +18,10 @@ logFormatter = logging.Formatter(
 consoleHandler = logging.StreamHandler()
 consoleHandler.setFormatter(logFormatter)
 rootLogger.addHandler(consoleHandler)
+
+def per_feature_cutoffs(count_mat, percentile):
+    print (count_mat)
+    return
 
 def autodetect_input_and_open(filename):
     filename =  filename.strip()
@@ -39,19 +46,19 @@ def autodetect_input_and_open(filename):
     if clipped_fn.endswith('.csv'):
         return (
             fh,
-            'csv',
+            'delimited_text',
             ','
         )
     elif clipped_fn.endswith('.tsv'):
         return (
             fh,
-            'tsv',
+            'delimited_text',
             '\t'
         )
     elif clipped_fn.endswith('.txt'):
         return(
             fh,
-            'txt',
+            'delimited_text',
             '\s+'
         )
     else:
@@ -79,15 +86,78 @@ def main():
     args_parser.add_argument(
         '--output', '-O',
         help='Where to store the probability matrix. (Default: stdout)',
-        default=sys.stdout
+        default=sys.stdout,
+    )
+    args_parser.add_argument(
+        '--percentile', '-P',
+        help='Percentile cutoff to be considered present. (Default 2.5)',
+        default=2.5
+    )
+    args_parser.add_argument(
+        '--input-layer', '-IL',
+        help='(for anndata input only) which layer contains the raw counts',
+        default="",
+        type=str,
     )
     
+
     args = args_parser.parse_args()
 
+    # Open the file using autodetection
     (fh, filetype, delimiter) = autodetect_input_and_open(args.input)
+    if filetype == 'anndata':
+        d = ad.read_h5ad(args.input)
+        if args.input_layer == "":
+            if scipy.sparse.issparse(d.X):
+                count_mat = pd.DataFrame.sparse.from_spmatrix(
+                    d.X,
+                    index=d.obs_names,
+                    columns=d.var_names,
+                )
+            else:
+                count_mat = pd.DataFrame(
+                    d.X,
+                    index=d.obs_names,
+                    columns=d.var_names,
+                    dtype=np.int32
+                )
+        else:
+            if args.input_layer not in d.layers:
+                logging.error(
+                    f"Layer {args.input_layer} not in {args.input}."
+                )
+                sys.exit(404)
+            # Implicit else
+            if scipy.sparse.issparse(d.layers[args.input_layer]):
+                count_mat = pd.DataFrame.sparse.from_spmatrix(
+                    d.layers[args.input_layer],
+                    index=d.obs_names,
+                    columns=d.var_names,
+                )
+            else:
+                count_mat = pd.DataFrame(
+                    d.layers[args.input_layer],
+                    index=d.obs_names,
+                    columns=d.var_names,
+                    dtype=np.int32
+                )
+    elif filetype == 'delimited_text':
+        count_mat = pd.read_csv(
+            fh,
+            delimiter=delimiter,
+        )
 
-    print(filetype)
+    else:
+        logging.error(
+            f"{args.input} is not of a format I can recognize or open (tsv, txt, csv or anndata)."
+        )
+        sys.exit(404)
 
+    # Great now identify per-feature cutoffs
+    per_feature_cutoffs(
+        count_mat, 
+        percentile=args.percentile
+    )
 
 if __name__ == "__main__":
     main()

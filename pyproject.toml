@@ -7,6 +7,8 @@ name = "zeroish"
 version = "0.0.1"
 dependencies = [
     'numpy',
+    'pandas',
+    'anndata',
 ]
 authors = [
   { name="Jonathan Golob", email="j-dev@golob.org" },
