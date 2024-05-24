@@ -40,30 +40,77 @@ def get_feature_cutoffs_percentile(f_mat, percentile):
     return f_percentile_cutoffs
 
 def generate_pdet_matrix(count_mat, total_counts_vec, feature_cutoffs_vec):
-    zero_values = pd.DataFrame(
-        np.where(count_mat == 0),
-        index=['obs_i', 'feat_j']
-    ).astype(int).T
-    zero_values.index = range(len(zero_values))
-    p_det = zero_values.apply(
-        lambda r: np.exp(
-            -1*total_counts_vec[r[0]]*feature_cutoffs_vec[r[1]]
-        ),
-        axis=1,
-        raw=True,
-        engine='numba',        
-        engine_kwargs={
-            'parallel': True,
-        },
-    )
-    p_det_mat = np.ones(
-        shape=count_mat.shape,
-        dtype=np.float32
-    )
-    for idx, row in zero_values.iterrows():
-        p_det_mat[row.obs_i, row.feat_j] = p_det[idx]
+    if hasattr(count_mat, 'sparse'):
+        # Keep it sparse...
+        p_det_mat = scipy.sparse.dok_matrix(
+            count_mat.shape,
+            dtype=np.float32
+        )
+        # Use features effectively as batches. 
+        count_mat_T = count_mat.T
+        for j in range(count_mat_T.shape[0]):
+            feat_count = count_mat_T.iloc[j].values
+            # Just set the nonzero equal to 1
+            p_det_mat[feat_count.nonzero(), j] = 1.0
 
-    return p_det_mat    
+            # Now the zeros...
+            f_zero_values = pd.DataFrame(
+                np.where(feat_count == 0),
+                index=['obs_i']
+            ).astype(int).T
+            p_det_mat[f_zero_values['obs_i'].values, j] = f_zero_values.apply(
+                lambda r: np.exp(
+                    -1*total_counts_vec[r[0]]*feature_cutoffs_vec[j]
+                ),
+                raw=True,
+                #engine='numba',        
+                #engine_kwargs={
+                #    'parallel': True,
+                #},
+            )            
+
+        """
+        for i in range(count_mat.shape[0]):
+            for j in range(count_mat.shape[1]):
+                if count_mat.iloc[i, j] == 0:
+                    p_det_mat[i, j] = -1*total_counts_vec[i]*feature_cutoffs_vec[j]
+                else:
+                    p_det_mat[i, j] = 1
+        """
+        logging.info("Converting to CSR sparse matrix")
+        p_det_mat = p_det_mat.tocsr()
+
+        return p_det_mat
+
+    else:
+        zero_values = pd.DataFrame(
+            np.where(count_mat == 0),
+            index=['obs_i', 'feat_j']
+        ).astype(int).T
+        logging.info(
+            f"There are {len(zero_values):,d} zero counts for which we need to calculate probabilties."
+        )
+        zero_values.index = range(len(zero_values))
+        p_det = zero_values.apply(
+            lambda r: np.exp(
+                -1*total_counts_vec[r[0]]*feature_cutoffs_vec[r[1]]
+            ),
+            axis=1,
+            raw=True,
+            engine='numba',        
+            engine_kwargs={
+                'parallel': True,
+            },
+        )
+        logging.info("Generating the probability matrix")
+        p_det_mat = np.ones(
+            shape=count_mat.shape,
+            dtype=np.float32
+        )
+        for idx, row in zero_values.iterrows():
+            p_det_mat[row.obs_i, row.feat_j] = p_det[idx]
+
+        return p_det_mat    
 
 def autodetect_input_and_open(filename):
     filename =  filename.strip()
@@ -183,6 +230,9 @@ def main():
                 sys.exit(404)
             # Implicit else
             if scipy.sparse.issparse(d.layers[args.input_layer]):
+                logging.warn(
+                    "You have provided sparse data. The probability-detected matrix to be generated will be dense. This may result in excessive memory use."
+                )                
                 count_mat = pd.DataFrame.sparse.from_spmatrix(
                     d.layers[args.input_layer],
                     index=d.obs_names,
@@ -207,20 +257,23 @@ def main():
             f"{args.input} is not of a format I can recognize or open (tsv, txt, csv or anndata)."
         )
         sys.exit(404)
+    
     logging.info(
         f"Completed loading data. There are {count_mat.shape[0]} observations and {count_mat.shape[1]} features."
     )
-
     # Generate a fractional abundance matrix after getting the per-obs total reads
-    total_counts = count_mat.sum(axis=1)
+    logging.info("Calculating the total counts per specimen.")
+    total_counts = count_mat.T.sum(axis=0) # Transpose to help with sparse matrix performance
+    logging.info("Generating relative abundance matrix.")
     f_mat = (count_mat.T / total_counts).T
-    logging.info("Generated relative abundance matrix. Starting feature cutoff detection.")
+    logging.info("Starting feature cutoff detection.")
     # Great now identify per-feature cutoffs
     feature_cutoffs_percentile = get_feature_cutoffs_percentile(
         f_mat, 
         percentile=args.percentile
     )
     logging.info(f"Generated per-feature cutoffs for {len(feature_cutoffs_percentile)} features.")
+    logging.info("Generating the probability detected matrix.")
     p_det_mat = generate_pdet_matrix(
         count_mat,
         total_counts.astype(np.int32).values,
