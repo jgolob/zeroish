@@ -13,7 +13,7 @@ import scipy
 rootLogger = logging.getLogger()
 rootLogger.setLevel(logging.INFO)
 logFormatter = logging.Formatter(
-    '%(asctime)s %(levelname)-8s [phylotypes] %(message)s'
+    '%(asctime)s %(levelname)-8s [zeroish] %(message)s'
 )
 consoleHandler = logging.StreamHandler()
 consoleHandler.setFormatter(logFormatter)
@@ -88,19 +88,19 @@ def autodetect_input_and_open(filename):
     if clipped_fn.endswith('.csv'):
         return (
             fh,
-            'delimited_text',
+            'csv',
             ','
         )
     elif clipped_fn.endswith('.tsv'):
         return (
             fh,
-            'delimited_text',
+            'tsv',
             '\t'
         )
     elif clipped_fn.endswith('.txt'):
         return(
             fh,
-            'delimited_text',
+            'tsv',
             '\s+'
         )
     else:
@@ -141,16 +141,28 @@ def main():
         default="",
         type=str,
     )
+    args_parser.add_argument(
+        '--output-layer', '-OL',
+        help='(for anndata output only) layer into which to place the probability of detection (defaut: prob_detected)',
+        default="prob_detected",
+        type=str,
+    )
     
 
     args = args_parser.parse_args()
-
+    logging.info("Attempting to identify input filetype.")
     # Open the file using autodetection
     (fh, filetype, delimiter) = autodetect_input_and_open(args.input)
+    logging.info(
+        f'{args.input} was identified as being of type {filetype} with delimiter {delimiter}.'
+    )
     if filetype == 'anndata':
         d = ad.read_h5ad(args.input)
         if args.input_layer == "":
             if scipy.sparse.issparse(d.X):
+                logging.warn(
+                    "You have provided sparse data. The probability-detected matrix to be generated will be dense. This may result in excessive memory use."
+                )
                 count_mat = pd.DataFrame.sparse.from_spmatrix(
                     d.X,
                     index=d.obs_names,
@@ -183,7 +195,7 @@ def main():
                     columns=d.var_names,
                     dtype=np.int32
                 )
-    elif filetype == 'delimited_text':
+    elif filetype == 'csv' or filetype == 'tsv':
         count_mat = pd.read_csv(
             fh,
             delimiter=delimiter,
@@ -195,23 +207,76 @@ def main():
             f"{args.input} is not of a format I can recognize or open (tsv, txt, csv or anndata)."
         )
         sys.exit(404)
+    logging.info(
+        f"Completed loading data. There are {count_mat.shape[0]} observations and {count_mat.shape[1]} features."
+    )
 
     # Generate a fractional abundance matrix after getting the per-obs total reads
     total_counts = count_mat.sum(axis=1)
     f_mat = (count_mat.T / total_counts).T
+    logging.info("Generated relative abundance matrix. Starting feature cutoff detection.")
     # Great now identify per-feature cutoffs
     feature_cutoffs_percentile = get_feature_cutoffs_percentile(
         f_mat, 
         percentile=args.percentile
     )
+    logging.info(f"Generated per-feature cutoffs for {len(feature_cutoffs_percentile)} features.")
     p_det_mat = generate_pdet_matrix(
         count_mat,
         total_counts.astype(np.int32).values,
         feature_cutoffs_percentile.astype(np.float32).values,
     )
-
-    print(p_det_mat)
-
+    logging.info("Completed generation of the specimen-feature probability of detection.")
+    ## Output type
+    if args.output is sys.stdout:
+        pd.DataFrame(
+            p_det_mat,
+            index=count_mat.index,
+            columns=count_mat.columns
+        ).to_csv(sys.stdout)
+        sys.exit(0)
+    # Implicit else
+    if args.output.lower().endswith('.csv') or args.output.lower().endswith('.tsv') or args.output.lower().endswith('.txt') \
+        or args.output.lower().endswith('.csv.gz') or args.output.lower().endswith('.tsv.gz') or args.output.lower().endswith('.txt.gz'):
+        if delimiter is None:
+            delimiter = ','
+        pd.DataFrame(
+            p_det_mat,
+            index=count_mat.index,
+            columns=count_mat.columns
+        ).to_csv(
+            args.output,
+            sep=delimiter,
+        )
+        sys.exit(0)
+    # Implicit else
+    if args.output.lower().endswith('.h5ad') and filetype == 'anndata':
+        # I realize this may be a reload. 
+        d = ad.read_h5ad(args.input)
+        if args.output_layer in d.layers:
+            logging.warn(
+                f"Layer {args.output_layer} exists in the provided ann data and will be overwritten."
+            )
+        d.layers[args.output_layer] = p_det_mat
+        d.write_h5ad(
+            args.output
+        )
+        sys.exit(0)
+    # Implicit else
+    if args.output.lower().endswith('.h5ad'):
+        # Requesting anndata output without anndata input. That's fine.
+        d = ad.AnnData(
+            p_det_mat,
+            obs=pd.DataFrame(index=count_mat.index),
+            var=pd.DataFrame(index=count_mat.columns)
+        )
+        d.layers[args.output_layer] = p_det_mat
+        d.write_h5ad(
+            args.output
+        )
+        sys.exit(0)
+    
+    logging.info("Done.")
 
 if __name__ == "__main__":
     main()
