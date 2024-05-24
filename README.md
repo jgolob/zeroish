@@ -1,5 +1,8 @@
 # Zeroish
 
+## Usage:
+`zeroish -I <input_file> -O <output_file>`
+
 ## The problem it solves:
 
 Compositional data can be generated from a variety of sources, including (single-cell) RNA-sequencing, 16S or whole genome shotgun microbiome data, and others. In biological systems, a log-normal distribution is typical for the relative contributions of each feature in a given specimen. A few features will comprise the bulk of the counts for a specimen, with a long and often deep tail. Some of the most functionally important features (such as transcription factors, or methanogens in RNA or microbiomes respectively) are only found at very low levels relative to other features. Further, it typical that the total observations per specimen will vary--often by almost an order of magnitude, even within the same batch of specimens processed with the same methods. 
